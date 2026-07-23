@@ -58,6 +58,18 @@ std::string describeAzAlt(double azimuth, double altitude) {
 	return Core::localized(altPrefix + "_TO_THE_" + getAzimuthDirectionID(azimuth));
 }
 
+std::string describeAzAltMidsentence(double azimuth, double altitude) {
+	static constexpr auto nearlyOverheadAngle = 60 * deg2rad;
+	
+	// Near the zenith a compass direction stops meaning anything; below it the phrase pairs an
+	// altitude bucket with the eight-point compass
+	if (altitude >= nearlyOverheadAngle) {
+		return Core::localized("MIDSENTENCE_NEARLY_OVERHEAD");
+	}
+	std::string altPrefix = altitude > 30.0 * deg2rad ? "HIGH" : "LOW";
+	return Core::localized("MIDSENTENCE_" + altPrefix + "_TO_THE_" + getAzimuthDirectionID(azimuth));
+}
+
 std::string describeAltitude(double altitude, double riseSetAngle) {
 	static constexpr auto highAboveHorizonAngle = 30 * deg2rad;
 	static constexpr auto nearlyOverheadAngle = 60 * deg2rad;

@@ -26,6 +26,9 @@ namespace Text {
 /// @brief Describes an azimuth and altitude as a combined directional phrase.
 [[nodiscard]] std::string describeAzAlt(double azimuth, double altitude);
 
+/// @brief Describes an azimuth and altitude as a mid-sentence locative phrase ("low in the southwest").
+[[nodiscard]] std::string describeAzAltMidsentence(double azimuth, double altitude);
+
 /// @brief Describes an altitude relative to the horizon.
 [[nodiscard]] std::string describeAltitude(double altitude, double riseSetAngle);
 
@@ -79,6 +82,10 @@ inline void descriptionsSelfTest() {
 	check(describeAzimuth(0.) == "TO_THE_NORTH", "azimuth phrase key");
 	check(describeAzAlt(pi / 2., 45. * deg2rad) == "HIGH_TO_THE_EAST", "high azimuth-altitude phrase key");
 	check(describeAltitude(70. * deg2rad, 0.) == "NEARLY_OVERHEAD", "altitude nearly overhead");
+	// The mid-sentence locative buckets a near-zenith altitude before choosing a compass phrase.
+	check(describeAzAltMidsentence(pi / 2., 45. * deg2rad) == "MIDSENTENCE_HIGH_TO_THE_EAST", "mid-sentence high phrase key");
+	check(describeAzAltMidsentence(pi, 10. * deg2rad) == "MIDSENTENCE_LOW_TO_THE_SOUTH", "mid-sentence low phrase key");
+	check(describeAzAltMidsentence(0., 70. * deg2rad) == "MIDSENTENCE_NEARLY_OVERHEAD", "mid-sentence overhead phrase key");
 	// A magnitude formats to its pretty-precision value with a unit suffix.
 	check(formatMagnitude(4.5f, 2) == "4.5 mag", "formatted magnitude value");
 }
