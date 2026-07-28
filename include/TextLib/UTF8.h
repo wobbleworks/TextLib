@@ -56,9 +56,32 @@ bool decodeUTF8Char(std::string_view utf8String, uint32_t& char32, std::string_v
 [[nodiscard]] uint32_t normalizeUnicodeChar(uint32_t char32) noexcept;
 
 ///----------------------------------------
-/// @brief Normalize a UTF-8 string by removing diacriticals and converting to lowercase.
-/// @param string The UTF-8 string to normalize.
-/// @return The normalized string.
+///   @brief Whether a code point carries no meaning for matching and should be folded away.
+/// @details The invisible formatting characters: soft hyphens, the zero-width space/joiners, the word
+///          joiner, the byte-order mark and the bidi marks. They exist to instruct a renderer — a soft
+///          hyphen marks where a long compound word such as @c "Sonnenblumengalaxie" may be broken — and
+///          never to distinguish one string from another, so a reader typing the word as they see it must
+///          still match the string that contains them.
+///   @param char32 The Unicode code point to test.
+///  @return True if the code point should be dropped when normalizing for comparison.
+///----------------------------------------
+
+[[nodiscard]] constexpr bool isIgnorableForMatching(uint32_t char32) noexcept {
+	return char32 == 0x00AD    // soft hyphen
+		|| char32 == 0x200B    // zero width space
+		|| char32 == 0x200C    // zero width non-joiner
+		|| char32 == 0x200D    // zero width joiner
+		|| char32 == 0x200E    // left-to-right mark
+		|| char32 == 0x200F    // right-to-left mark
+		|| char32 == 0x2060    // word joiner
+		|| char32 == 0xFEFF;   // zero width no-break space (byte-order mark)
+}
+
+///----------------------------------------
+///   @brief Normalize a UTF-8 string by removing diacriticals, converting to lowercase, and dropping the
+///          invisible formatting characters that @ref isIgnorableForMatching names.
+///   @param string The UTF-8 string to normalize.
+///  @return The normalized string.
 ///----------------------------------------
 
 [[nodiscard]] std::string normalizeUTF8String(std::string_view string);
@@ -144,6 +167,12 @@ inline void utf8SelfTest() {
 	check(normalizeUnicodeChar(0xC9) == 'e', "normalize strips diacritical");
 	check(normalizeUnicodeChar('z') == 'z', "normalize leaves lowercase ASCII");
 	check(normalizeUTF8String("\xC3\x89\xC3\xA9") == "ee", "normalize whole string");
+	// Invisible formatting characters are folded away, so a word typed as it reads still matches a string
+	// carrying the hyphenation hints a renderer needs.
+	check(isIgnorableForMatching(0x00AD) && isIgnorableForMatching(0xFEFF), "formatting characters are ignorable");
+	check(!isIgnorableForMatching('a') && !isIgnorableForMatching(0x00A0), "letters and spaces are not");
+	check(normalizeUTF8String("Orion\u00ADnebel") == "orionnebel", "normalize drops a soft hyphen");
+	check(normalizeUTF8String("a\u200Bb\uFEFFc") == "abc", "normalize drops zero-width characters");
 	
 	// Uppercasing maps both ASCII and the Latin-1 accented vowels.
 	check(toupper('a') == 'A', "uppercase ASCII");

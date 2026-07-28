@@ -11,6 +11,7 @@
 #pragma once
 
 #include "TextLib/SelfTestCheck.h"
+#include "TextLib/UTF8.h"
 
 #include <algorithm>
 #include <cassert>
@@ -18,6 +19,7 @@
 #include <compare>
 #include <string>
 #include <string_view>
+#include <vector>
 
 ///----------------------------------------
 namespace Text {
@@ -91,6 +93,74 @@ namespace Text {
 	*matchedPos = 0;
 	*matchedSize = 0;
 	return false;
+}
+
+///----------------------------------------
+///   @brief Locate @p needle in @p haystack, ignoring case, diacriticals and invisible formatting.
+/// @details Where @ref findIgnoreCaseAndSpaces tolerates whitespace, this tolerates everything
+///          @ref normalizeUTF8String folds: case, accents, and the soft hyphens and zero-width characters
+///          a renderer needs but a reader never types. A search for @c "Orionnebel" therefore matches a
+///          stored name carrying a soft hyphen between its two halves.
+///    @note The reported position and length index the ORIGINAL @p haystack, not its normalized form, so a
+///          caller can highlight the match in the string it is about to display.
+///   @param haystack The string to search within.
+///   @param needle The string to search for.
+/// @param[out] matchedPos Index in @p haystack of the first matched byte.
+/// @param[out] matchedSize Length of the matched span in @p haystack.
+///  @return @c true if a match was found.
+///----------------------------------------
+
+[[nodiscard]] inline bool findNormalized(std::string_view haystack, std::string_view needle, std::string_view::size_type* matchedPos, std::string_view::size_type* matchedSize) {
+	assert(matchedPos != nullptr);
+	assert(matchedSize != nullptr);
+	*matchedPos = 0;
+	*matchedSize = 0;
+	
+	// Normalize the haystack, recording which original byte each normalized byte came from, so a match is
+	// reported against the string the caller holds rather than against a temporary
+	auto normalizedHaystack = std::string();
+	auto originalOffsets = std::vector<std::string_view::size_type>();
+	normalizedHaystack.reserve(haystack.size());
+	originalOffsets.reserve(haystack.size() + 1);
+	
+	auto remainder = haystack;
+	auto char32 = uint32_t{};
+	while (!remainder.empty()) {
+		auto offset = static_cast<std::string_view::size_type>(remainder.data() - haystack.data());
+		auto next = std::string_view();
+		if (!decodeUTF8Char(remainder, char32, next)) {
+			break;
+		}
+		remainder = next;
+		
+		if (isIgnorableForMatching(char32)) {
+			continue;
+		}
+		
+		auto normalized = encodeUnicodeChar(normalizeUnicodeChar(char32));
+		for ([[maybe_unused]] auto byte : normalized) {
+			originalOffsets.push_back(offset);
+		}
+		normalizedHaystack.append(normalized);
+	}
+	originalOffsets.push_back(haystack.size());
+	
+	// An empty needle matches nothing, which is what an empty search field should find
+	auto normalizedNeedle = normalizeUTF8String(needle);
+	if (normalizedNeedle.empty()) {
+		return false;
+	}
+	
+	auto position = normalizedHaystack.find(normalizedNeedle);
+	if (position == std::string::npos) {
+		return false;
+	}
+	
+	// Map the matched span back onto the original string
+	auto end = std::min(position + normalizedNeedle.size(), originalOffsets.size() - 1);
+	*matchedPos = originalOffsets[position];
+	*matchedSize = originalOffsets[end] - *matchedPos;
+	return true;
 }
 
 ///----------------------------------------
@@ -225,6 +295,13 @@ inline void searchSelfTest() {
 	// A whole-text match is exact, while an absent needle yields an empty result.
 	check(SearchResult("Hello", "hello").exact(), "whole-text match is exact");
 	check(SearchResult("Hello", "xyz").empty(), "absent needle is empty");
+	// Normalized matching folds case, accents and the invisible formatting a renderer needs.
+	check(findNormalized("Orion\u00ADnebel", "Orionnebel", &matchedPos, &matchedSize), "finds across a soft hyphen");
+	check(matchedPos == 0 && matchedSize == std::string_view("Orion\u00ADnebel").size(), "reports the span in the original string");
+	check(findNormalized("Nebulosa Cabeza de Caballo", "CABEZA", &matchedPos, &matchedSize) && matchedPos == 9, "folds case");
+	check(findNormalized("Nebuleuse de la T\u00EAte", "tete", &matchedPos, &matchedSize), "folds accents");
+	check(!findNormalized("Pferdekopfnebel", "", &matchedPos, &matchedSize), "an empty needle finds nothing");
+	check(!findNormalized("Pferdekopfnebel", "Orion", &matchedPos, &matchedSize), "reports a miss");
 	// Exact matches sort ahead of partial ones.
 	check(SearchResult("abc", "abc") < SearchResult("abcd", "abc"), "exact sorts before partial");
 	// Non-empty matches sort ahead of empty ones.

@@ -404,10 +404,14 @@ std::string normalizeUTF8String(std::string_view string) {
 	auto normalizedString = std::string{};
 	normalizedString.reserve(string.length());
 	
-	// Decode, normalize, and re-encode each code point
+	// Decode, normalize, and re-encode each code point, dropping the ones that carry no meaning for a
+	// comparison
 	auto nextUTF8 = string;
 	auto char32 = uint32_t{};
 	while (decodeUTF8Char(nextUTF8, char32, nextUTF8)) {
+		if (isIgnorableForMatching(char32)) {
+			continue;
+		}
 		char32 = normalizeUnicodeChar(char32);
 		normalizedString.append(encodeUnicodeChar(char32));
 	}
@@ -415,12 +419,15 @@ std::string normalizeUTF8String(std::string_view string) {
 }
 
 std::string normalizedFirstLetterOfUTFString(std::string_view utf8String) {
-	// Decode the first character
+	// Decode the first character that means anything for a comparison
 	auto char32 = uint32_t{};
 	auto remainder = std::string_view{};
-	if (!decodeUTF8Char(utf8String, char32, remainder)) {
-		return {};
-	}
+	do {
+		if (!decodeUTF8Char(utf8String, char32, remainder)) {
+			return {};
+		}
+		utf8String = remainder;
+	} while (isIgnorableForMatching(char32));
 	
 	// Normalize and re-encode it
 	return std::string(encodeUnicodeChar(normalizeUnicodeChar(char32)));
