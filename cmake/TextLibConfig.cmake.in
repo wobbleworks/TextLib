@@ -1,0 +1,56 @@
+#----------------------------------------
+# TextLibConfig.cmake
+#
+# The package find_package(TextLib CONFIG) resolves. Consumers link the imported target
+# TextLib::TextLib, which is the same name an in-repository add_subdirectory() build provides,
+# so a consumer never has to know which route it got the library through.
+#
+# CoreLib is a genuinely public dependency: Printf.h includes CoreLib/Locale.h and DateFormat.h
+# is written in CoreLib's CivilDate, Scale and TimeZone types, so a consumer compiles CoreLib's
+# declarations into its own translation units whether it names CoreLib or not.
+#
+# Because CoreLib is already required, the opt-in TextLib/SelfTest.h aggregator resolves with no
+# extra work — this package needs none of the optional SelfTest component machinery that MathLib
+# and AnimationLib carry.
+#
+# NOT handled here: TextLib/HTML.h includes <libxml/HTMLparser.h>, and TextLib deliberately does
+# not link libxml2 — the consuming application does. A consumer of that one header must therefore
+# supply libxml2's include path and library itself. Every other TextLib header is unaffected.
+#----------------------------------------
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# find_dependency, not find_package: CoreLib is a hard requirement, so failing to find it must
+# fail this package rather than leave a consumer with a half-usable target.
+find_dependency(CoreLib)
+
+#----------------------------------------
+# Localized-date backend
+#
+# Which library backs the date formatters is decided when TextLib is built, not when it is
+# consumed, so the answer is baked in here rather than re-derived. Apple builds link Foundation
+# and Windows builds link the operating system's own ICU — both ride along on the exported target
+# as plain link entries needing no package search. A build that found ICU through find_package
+# exports the ICU:: targets instead, and those a consumer has to reconstruct.
+#----------------------------------------
+if(@TEXTLIB_EXPORT_NEEDS_ICU@)
+	find_dependency(ICU COMPONENTS i18n uc)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/TextLibTargets.cmake")
+
+#----------------------------------------
+# Attach CoreLib to the imported target
+#
+# The dependency is applied here rather than recorded in TextLibTargets.cmake because TextLib's
+# own test build brings CoreLib in through add_subdirectory, and CMake refuses to export a target
+# that requires one belonging to no export set. By the time this line runs, find_dependency above
+# has created the real imported CoreLib::CoreLib in the consumer's scope, so appending it gives an
+# installed consumer exactly the transitive include path and link entry it would have had.
+#----------------------------------------
+set_property(TARGET TextLib::TextLib APPEND PROPERTY
+	INTERFACE_LINK_LIBRARIES CoreLib::CoreLib)
+
+check_required_components(TextLib)

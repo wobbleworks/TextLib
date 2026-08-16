@@ -16,40 +16,108 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Declare a project only at top level; when added via add_subdirectory() the
-# parent project() and toolchain govern.
+# parent project() and toolchain govern. The version is what find_package(TextLib 1.2)
+# negotiates against; it is carried here rather than in a tag so a source checkout and an
+# installed package agree without consulting git.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-	project(TextLib CXX)
+	project(TextLib VERSION 1.0.0 LANGUAGES CXX)
 endif()
 
+# GNUInstallDirs defines CMAKE_INSTALL_INCLUDEDIR / _LIBDIR, which the public include
+# directories below reference through their install-tree generator expression.
+include(GNUInstallDirs)
+
 add_library(TextLib)
+
+#----------------------------------------
+# Namespaced alias
+#
+# Consumers spell the dependency TextLib::TextLib whether they picked it up through
+# add_subdirectory() or find_package(); the double colon also makes CMake fail at configure
+# time on a misspelling rather than passing the name through to the linker as a bare -l.
+#----------------------------------------
+add_library(TextLib::TextLib ALIAS TextLib)
 
 #----------------------------------------
 # Public API
 #
 # Headers live under include/TextLib/, so the include path is `include` and
 # consumers write  #include "TextLib/AngleFormat.h".
+#
+# The two generator expressions describe the same headers in the two places they can live: the
+# source tree while TextLib is being built, and the install prefix once it has been packaged.
+# An exported target may not name a path inside the source directory, so a plain `include`
+# here would make install(EXPORT) below fail outright.
 #----------------------------------------
-target_include_directories(TextLib PUBLIC include)
+target_include_directories(TextLib PUBLIC
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+	$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 #----------------------------------------
-# First-party header dependencies
+# First-party dependency: CoreLib (public)
 #
-# CoreLib (localization, locale, time) and MathLib (numeric constants) are
-# header sibling libraries, each exposing its API under an include/ root so
-# consumers write  #include "CoreLib/Locale.h"  /  #include "MathLib/Numbers.h".
-# Both are needed to compile the sources; their symbols resolve when the final
-# application links the sibling libraries. Override these cache variables to
-# point at the libraries' locations.
+# Printf.h reaches CoreLib/Locale.h, and DateFormat.h is written in CoreLib's CivilDate, Scale
+# and TimeZone types. Those are public headers, so CoreLib is part of TextLib's *interface*:
+# every consumer that includes one of them compiles CoreLib's declarations into its own
+# translation unit. It is carried PUBLIC, and TextLibConfig.cmake calls find_dependency(CoreLib).
+#
+# This is a correction. The dependency was a PRIVATE include directory, which does not propagate
+# at all — consumers had to put CoreLib on the include path themselves and happened to, because
+# the application supplies every first-party header root globally. That works in this repository
+# and nowhere else.
+#
+# MathLib is deliberately gone: nothing in TextLib's headers, sources or tests references it, so
+# the previous MATHLIB_INCLUDE_DIR was dead configuration and the comment claiming a numeric-
+# constants dependency was stale.
+#
+# Named as a target rather than a path, because a raw path cannot survive install(EXPORT) — it is
+# either inside the source tree (rejected) or wrapped in $<BUILD_INTERFACE:> and silently dropped
+# from the installed target. Resolved from the real package when there is one, and otherwise from
+# an imported target over the sibling checkout so a standalone build still configures unaided.
 #----------------------------------------
 get_filename_component(WW_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
 set(CORELIB_INCLUDE_DIR "${WW_REPO_ROOT}/CoreLib/include"
 	CACHE PATH "Directory containing the CoreLib/ header tree")
-set(MATHLIB_INCLUDE_DIR "${WW_REPO_ROOT}/MathLib/include"
-	CACHE PATH "Directory containing the MathLib/ header tree")
-target_include_directories(TextLib PRIVATE
-	"${CORELIB_INCLUDE_DIR}"
-	"${MATHLIB_INCLUDE_DIR}")
-	
+set(CORELIB_SOURCE_DIR "${WW_REPO_ROOT}/CoreLib"
+	CACHE PATH "CoreLib source directory (built as a subproject for the test runner)")
+
+# Whether the test runner will be built decides how much of CoreLib is needed, so it has to be
+# known here rather than at the bottom of the file. BUILD_TESTING unset counts as enabled (a bare
+# configure, or CI); packaging builds pass -DBUILD_TESTING=OFF.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND (NOT DEFINED BUILD_TESTING OR BUILD_TESTING))
+	set(TEXTLIB_BUILD_TESTS ON)
+else()
+	set(TEXTLIB_BUILD_TESTS OFF)
+endif()
+
+#----------------------------------------
+# The build tree and the install tree describe this dependency differently, and deliberately so.
+#
+# While TextLib is being built, CoreLib is a sibling header tree reached by path. Naming a target
+# here instead would collide with the test build, which brings CoreLib in via add_subdirectory to
+# get its compiled locale-facts backend — two routes defining CoreLib::CoreLib is a hard configure
+# error. Worse, linking that subproject target would then make install(EXPORT) fail outright,
+# because a subproject CoreLib belongs to no export set.
+#
+# Once installed, the same dependency is the CoreLib *package*, named as a target so that
+# TextLibConfig.cmake's find_dependency(CoreLib) supplies it. $<INSTALL_INTERFACE:> keeps that
+# name out of the build-tree link entirely, so nothing has to be resolvable at export time.
+#
+# The installed dependency is therefore attached by TextLibConfig.cmake rather than recorded in
+# TextLibTargets.cmake: the config appends CoreLib::CoreLib to this target's link interface after
+# its own find_dependency(CoreLib) has created it. Naming CoreLib here instead — even wrapped in
+# $<INSTALL_INTERFACE:> — does not work, because CMake resolves CoreLib::CoreLib to the real
+# subproject target and then refuses to export a target requiring one that is in no export set.
+#
+# The usual warning about $<BUILD_INTERFACE:> paths vanishing from the installed target does not
+# bite here: that is exactly the intent, since the config supplies the install side.
+#
+# Stage 1's superbuild should retire this split by having the runner consume CoreLib the same way
+# the library does, rather than through add_subdirectory.
+#----------------------------------------
+target_include_directories(TextLib PUBLIC
+	$<BUILD_INTERFACE:${CORELIB_INCLUDE_DIR}>)
+
 target_compile_features(TextLib PUBLIC cxx_std_23)
 
 # Sources and public headers carry UTF-8 string literals and \u escapes (the ° in the angle formatters,
@@ -83,16 +151,28 @@ target_sources(TextLib PRIVATE
 # nothing to install or redistribute. Elsewhere the system libicu is located by find_package; a build
 # without it falls back to the fixed-English backend so the library always links.
 #----------------------------------------
+#
+# TEXTLIB_EXPORT_NEEDS_ICU records which backend won, so the generated config file knows whether
+# an installed consumer has to find ICU before it can link the exported target. The ICU targets
+# reach the interface because a PRIVATE dependency of a static library still propagates as a
+# link-only requirement — the archive carries unresolved ICU references either way.
+#----------------------------------------
+set(TEXTLIB_EXPORT_NEEDS_ICU OFF)
+
 if(APPLE)
 	target_sources(TextLib PRIVATE
 		src/DateFormat_Apple.mm)
 
+	# find_library only probes; linking its absolute path into the SDK would bake this machine's
+	# Xcode location into the exported package, so the link uses the relocatable -framework flag.
 	find_library(FOUNDATION_FRAMEWORK Foundation)
-	target_link_libraries(TextLib PRIVATE ${FOUNDATION_FRAMEWORK})
+	target_link_libraries(TextLib PRIVATE "-framework Foundation")
 elseif(WIN32 AND MSVC)
 	target_sources(TextLib PRIVATE
 		src/DateFormat_Icu.cpp)
 
+	# The operating system ships ICU and the SDK the import library, so this is a plain library
+	# name with no package to find — nothing for the config file to reconstruct.
 	target_link_libraries(TextLib PRIVATE icu)
 else()
 	find_package(ICU COMPONENTS i18n uc)
@@ -101,6 +181,7 @@ else()
 			src/DateFormat_Icu.cpp)
 
 		target_link_libraries(TextLib PRIVATE ICU::i18n ICU::uc)
+		set(TEXTLIB_EXPORT_NEEDS_ICU ON)
 	else()
 		message(STATUS "TextLib: ICU not found; localized dates use the fixed-English fallback backend")
 		target_sources(TextLib PRIVATE
@@ -138,15 +219,59 @@ else()
 endif()
 
 #----------------------------------------
-# Install the static archive to lib/ and the public headers to include/.
+# Install the static archive to lib/, the public headers to include/, and a find_package-able
+# CMake package to lib/cmake/TextLib/.
+#
+# Guarded to the top-level build. AstroDataLib's test build add_subdirectory()s TextLib, and an
+# inherited install rule would put TextLib's headers into AstroDataLib's prefix and from there
+# into its xcframework, colliding with TextLib.xcframework when the app links both. Matches the
+# guard on the test targets below.
+#
+# The Apple xcframework pipeline reads only lib/libTextLib.a and include/ out of this prefix, so
+# the package files added here are inert as far as that artifact is concerned.
 #----------------------------------------
-include(GNUInstallDirs)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+	include(CMakePackageConfigHelpers)
 
-install(TARGETS TextLib
-	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+	set(TEXTLIB_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/TextLib")
 
-install(DIRECTORY include/
-	DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+	install(TARGETS TextLib
+		EXPORT TextLibTargets
+		ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+	# Headers only. The include tree also carries .DS_Store files, which would otherwise be packaged
+	# into the xcframework's Headers directory and shipped. An allow-list rather than a
+	# PATTERN ... EXCLUDE blacklist, so no new kind of stray file can leak in later.
+	install(DIRECTORY include/
+		DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+		FILES_MATCHING PATTERN "*.h")
+
+	install(EXPORT TextLibTargets
+		FILE TextLibTargets.cmake
+		NAMESPACE TextLib::
+		DESTINATION "${TEXTLIB_INSTALL_CMAKEDIR}")
+
+	# configure_package_config_file (rather than a plain configure_file) is what makes the installed
+	# package relocatable: it resolves paths relative to the config file's own location, so the prefix
+	# may be moved, mounted, or unpacked anywhere after the fact. It also substitutes
+	# TEXTLIB_EXPORT_NEEDS_ICU, so the config knows which date backend this build selected.
+	configure_package_config_file(
+		cmake/TextLibConfig.cmake.in
+		"${CMAKE_CURRENT_BINARY_DIR}/TextLibConfig.cmake"
+		INSTALL_DESTINATION "${TEXTLIB_INSTALL_CMAKEDIR}")
+
+	# SameMajorVersion: the public headers carry the ABI, so a consumer pinned to 1.x accepts any
+	# later 1.y but never a 2.0 that may have moved something out from under it.
+	write_basic_package_version_file(
+		"${CMAKE_CURRENT_BINARY_DIR}/TextLibConfigVersion.cmake"
+		VERSION ${PROJECT_VERSION}
+		COMPATIBILITY SameMajorVersion)
+
+	install(FILES
+		"${CMAKE_CURRENT_BINARY_DIR}/TextLibConfig.cmake"
+		"${CMAKE_CURRENT_BINARY_DIR}/TextLibConfigVersion.cmake"
+		DESTINATION "${TEXTLIB_INSTALL_CMAKEDIR}")
+endif()
 
 #----------------------------------------
 # Tests
@@ -175,11 +300,10 @@ endif()
 if(TEXTLIB_IS_TOP_LEVEL AND (NOT DEFINED BUILD_TESTING OR BUILD_TESTING))
 	enable_testing()
 
+	# CoreLib's headers arrive through TextLib's PUBLIC build interface, so the runner carries no
+	# include path of its own (and never needed MathLib, which nothing in TextLib references).
 	add_executable(textlib_selftest test/textlib_selftest_main.cpp)
 	target_link_libraries(textlib_selftest PRIVATE TextLib)
-	target_include_directories(textlib_selftest PRIVATE
-		"${CORELIB_INCLUDE_DIR}"
-		"${MATHLIB_INCLUDE_DIR}")
 	target_compile_features(textlib_selftest PRIVATE cxx_std_23)
 	target_compile_definitions(textlib_selftest PRIVATE DEBUG=1)
 	# The single aggregating TU instantiates every registered module's self-tests, which can exceed the
@@ -191,21 +315,19 @@ if(TEXTLIB_IS_TOP_LEVEL AND (NOT DEFINED BUILD_TESTING OR BUILD_TESTING))
 	#----------------------------------------
 	# The number/angle/time/printf/unit/description modules format through Core::currentLocale and the
 	# localizer facade, symbols compiled into CoreLib's per-platform locale-facts backend (Foundation on
-	# Apple, Win32 NLS on Windows, std::locale elsewhere). The runner therefore links CoreLib as a
-	# subproject on every platform. The localized date module registers everywhere too — its backend
-	# libraries (Foundation on Apple, ICU elsewhere, nothing for the fixed fallback) propagate from the
-	# TextLib target. Only the HTML module can be absent: it records itself as skipped without libxml2.
+	# Apple, Win32 NLS on Windows, std::locale elsewhere). CoreLib was therefore built as a subproject
+	# up where the dependency is resolved, and reaches this runner through TextLib's PUBLIC link
+	# interface — no separate link entry needed here. The localized date module registers everywhere
+	# too, its backend libraries propagating from the TextLib target. Only the HTML module can be
+	# absent: it records itself as skipped without libxml2.
 	#----------------------------------------
-	set(CORELIB_SOURCE_DIR "${WW_REPO_ROOT}/CoreLib"
-		CACHE PATH "CoreLib source directory (for add_subdirectory in the test build)")
 	if(NOT TARGET CoreLib)
 		add_subdirectory("${CORELIB_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/corelib-build")
 	endif()
 	target_link_libraries(textlib_selftest PRIVATE CoreLib)
 
 	if(APPLE)
-		find_library(FOUNDATION_FRAMEWORK Foundation)
-		target_link_libraries(textlib_selftest PRIVATE ${FOUNDATION_FRAMEWORK} xml2)
+		target_link_libraries(textlib_selftest PRIVATE "-framework Foundation" xml2)
 	elseif(TEXTLIB_HTML_MODULE)
 		# The runner is itself a libxml2 client, so it links the library the way any consuming
 		# application does (TextLib never links it). The imported target also carries the include
