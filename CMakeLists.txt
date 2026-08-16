@@ -27,6 +27,20 @@ endif()
 # directories below reference through their install-tree generator expression.
 include(GNUInstallDirs)
 
+#----------------------------------------
+# Primary build
+#
+# True when this library owns its install rules and test targets: either it is the top-level
+# project, or the repo-root superbuild has declared it a deliberate member of a multi-library
+# build rather than somebody's private subdirectory. A sibling that pulls this library in with
+# add_subdirectory gets neither, which is what keeps its headers out of the wrong install prefix.
+#----------------------------------------
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR WW_SUPERBUILD)
+	set(TEXTLIB_PRIMARY_BUILD ON)
+else()
+	set(TEXTLIB_PRIMARY_BUILD OFF)
+endif()
+
 add_library(TextLib)
 
 #----------------------------------------
@@ -84,7 +98,7 @@ set(CORELIB_SOURCE_DIR "${WW_REPO_ROOT}/CoreLib"
 # Whether the test runner will be built decides how much of CoreLib is needed, so it has to be
 # known here rather than at the bottom of the file. BUILD_TESTING unset counts as enabled (a bare
 # configure, or CI); packaging builds pass -DBUILD_TESTING=OFF.
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND (NOT DEFINED BUILD_TESTING OR BUILD_TESTING))
+if(TEXTLIB_PRIMARY_BUILD AND (NOT DEFINED BUILD_TESTING OR BUILD_TESTING))
 	set(TEXTLIB_BUILD_TESTS ON)
 else()
 	set(TEXTLIB_BUILD_TESTS OFF)
@@ -230,7 +244,7 @@ endif()
 # The Apple xcframework pipeline reads only lib/libTextLib.a and include/ out of this prefix, so
 # the package files added here are inert as far as that artifact is concerned.
 #----------------------------------------
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+if(TEXTLIB_PRIMARY_BUILD)
 	include(CMakePackageConfigHelpers)
 
 	set(TEXTLIB_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/TextLib")
@@ -286,7 +300,7 @@ endif()
 # target's link interface; on Apple the runner also links Foundation and libxml2 explicitly for the
 # modules it instantiates itself.
 #----------------------------------------
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+if(TEXTLIB_PRIMARY_BUILD)
 	set(TEXTLIB_IS_TOP_LEVEL ON)
 else()
 	set(TEXTLIB_IS_TOP_LEVEL OFF)
