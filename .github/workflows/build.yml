@@ -1,6 +1,9 @@
 name: Build & Self-Test
 
-# Build TextLib and run its module self-tests on every push and pull request.
+# Build TextLib and run its module self-tests on every push and pull request, under AddressSanitizer
+# and UndefinedBehaviorSanitizer everywhere the toolchain supports them (macOS and both Linux legs;
+# MSVC takes no -fsanitize flags, and the Android leg never executes). UBSan is made fatal with
+# -fno-sanitize-recover, so any violation aborts the runner and fails the job.
 #
 # TextLib is portable C++23; its number / angle / time / printf / unit / description modules format
 # through Core::currentLocale and the localizer facade, and CoreLib supplies those locale facts through a
@@ -16,9 +19,14 @@ name: Build & Self-Test
 # is checked out alongside TextLib; CMake finds it at ../CoreLib/include by default.
 # The repository is public and checks out with the default token.
 on:
+  # Branch pushes only. A tag push is handled by release.yml, which calls this workflow as a
+  # reusable job (workflow_call below) so a release is gated on this same matrix rather than
+  # running it a second time alongside.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   build-and-test:
@@ -31,12 +39,47 @@ jobs:
       matrix:
         include:
           # macOS builds and runs the full suite through the Foundation date backend.
-          - { name: macOS, os: macos-15 }
+          - name: macOS (ASan+UBSan)
+            os: macos-15
+            cmake_args: >-
+              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined"
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
           # Linux and Windows run the full suite through the ICU date backend, with the locale facts
           # supplied by CoreLib's std::locale and Win32 NLS backends respectively and libxml2 installed
           # for the HTML module. Windows needs no ICU setup: the OS ships icu.dll and the SDK its header.
-          - { name: Linux, os: ubuntu-latest }
-          - { name: Windows, os: windows-latest }
+          # Both Linux compilers are exercised rather than one: GCC and Clang disagree often enough on
+          # C++23 library conformance that a single Linux leg leaves real gaps.
+          - name: Linux GCC (ASan+UBSan)
+            os: ubuntu-latest
+            cmake_args: >-
+              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined"
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          - name: Linux Clang (ASan+UBSan)
+            os: ubuntu-latest
+            cmake_args: >-
+              -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20
+              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined"
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          # MSVC takes no -fsanitize flags, so the Windows leg builds and tests unsanitized — and
+          # deliberately passes no CMAKE_CXX_FLAGS at all, because setting that variable REPLACES
+          # MSVC's defaults rather than appending, silently dropping /EHsc and breaking the exception
+          # unwinding the self-test registry relies on.
+          - { name: Windows MSVC, os: windows-latest }
+          # Android arm64 cross-compiles the library alone and runs nothing: arm64 binaries need an
+          # emulator, and the available images are x86_64, which would test a different target than
+          # the one built. Unsanitized for the same reason — ASan and UBSan are runtime instrumentation.
+          #
+          # This leg earns its place beyond portability. Neither ICU nor libxml2 is reachable on
+          # Android, so it is the only configuration that compiles the fixed-English fallback date
+          # backend and the libxml2-less HTML path; every other leg has both libraries present.
+          - name: Android (arm64)
+            os: ubuntu-latest
+            build_only: true
+            cmake_args: >-
+              -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake
+              -DANDROID_ABI=arm64-v8a
+              -DANDROID_PLATFORM=android-24
+              -DBUILD_TESTING=OFF
 
     steps:
       - name: Check out TextLib
@@ -51,13 +94,29 @@ jobs:
           path: CoreLib
 
       # The HTML module wraps libxml2, which the Apple SDKs bundle but the Linux and Windows images do
-      # not carry headers for. The Windows step exposes vcpkg's toolchain to CMake through the
-      # CMAKE_TOOLCHAIN_FILE environment variable (honored by CMake >= 3.21), resolved in PowerShell
-      # where $env: expansion is well-defined rather than in a cross-shell argument.
+      # not carry headers for; libicu backs localized dates on Linux.
+      #
+      # Skipped on the Android leg, and not merely as an optimization: the NDK toolchain confines
+      # find_package to its own sysroot so host packages would not be found anyway, but installing
+      # them there would misrepresent that leg's whole point — it exists to compile the paths taken
+      # when ICU and libxml2 are absent.
       - name: Set up libxml2 and ICU (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.name != 'Android (arm64)'
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libicu-dev
 
+      # The runner image ships Clang 16-18 only. Clang 20 matches the version the other wobbleworks
+      # libraries build against, and libclang-rt carries its ASan/UBSan runtimes — without that
+      # package the sanitized link fails to find them.
+      - name: Install Clang 20 and its sanitizer runtimes (Linux Clang job)
+        if: matrix.name == 'Linux Clang (ASan+UBSan)'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y libclang-rt-20-dev
+
+      # Windows needs no ICU setup — the OS ships icu.dll and the SDK its header — but does need
+      # libxml2. This step exposes vcpkg's toolchain to CMake through the CMAKE_TOOLCHAIN_FILE
+      # environment variable (honored by CMake >= 3.21), resolved here in PowerShell where $env:
+      # expansion is well-defined rather than in a cross-shell argument.
       - name: Set up libxml2 via vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -69,8 +128,11 @@ jobs:
       # (../CoreLib/include relative to the TextLib source dir), which resolve to the
       # sibling checkouts above on every runner. The test build also adds CoreLib as a subproject to link
       # its compiled locale facts, found through CORELIB_SOURCE_DIR (../CoreLib), the sibling checkout.
+      # matrix.cmake_args carries the sanitizer flags on the host legs and the NDK toolchain on the
+      # Android one. It is interpolated into the shell command, so $ANDROID_NDK_LATEST_HOME inside it
+      # is expanded by bash on the runner rather than by the workflow expression evaluator.
       - name: Configure (CMake, Debug)
-        run: cmake -S TextLib -B build -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S TextLib -B build -DCMAKE_BUILD_TYPE=Debug ${{ matrix.cmake_args }}
 
       # --config is required for multi-config generators (Visual Studio) and ignored by single-config ones.
       - name: Build
@@ -80,4 +142,5 @@ jobs:
       # non-zero exit code and fails the job. --verbose (rather than --output-on-failure) keeps the runner's
       # per-module PASS/SKIP listing in the log even when every module passes.
       - name: Self-test (CTest)
+        if: ${{ !matrix.build_only }}
         run: ctest --test-dir build --build-config Debug --verbose

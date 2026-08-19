@@ -37,13 +37,56 @@ as `TextLib/<Module>.h`.
 
 ## Building
 
-TextLib is a CMake library target. Add it from a project that also provides
+TextLib is a CMake library target, available by three routes. All of them
+provide the same namespaced target, `TextLib::TextLib`, so nothing downstream
+has to know which route was used.
+
+Fetched at configure time — pin a tag, never a branch:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(TextLib
+	GIT_REPOSITORY https://github.com/wobbleworks/TextLib.git
+	GIT_TAG        v1.0.0)
+FetchContent_MakeAvailable(TextLib)
+target_link_libraries(your_target PRIVATE TextLib::TextLib)
+```
+
+From a checkout or submodule you already manage, in a project that also provides
 CoreLib:
 
 ```cmake
 add_subdirectory(TextLib)
-target_link_libraries(your_target PRIVATE TextLib)
+target_link_libraries(your_target PRIVATE TextLib::TextLib)
 ```
+
+Or from an installed package, after `cmake --install`. This route resolves
+CoreLib for you — `TextLibConfig.cmake` calls `find_dependency(CoreLib)`, since
+a half-usable target is worse than a failed configure — so CoreLib has to be
+discoverable, but need not be wired up by hand:
+
+```cmake
+find_package(TextLib 1.0 CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE TextLib::TextLib)
+```
+
+Two dependencies are optional and detected at configure time. **ICU** backs
+localized dates, reached through `NSDateFormatter` on macOS and the operating
+system's own `icu.dll` on Windows; where no ICU is found, localized dates fall
+back to a fixed-English backend. **libxml2** backs the HTML module and is
+bundled with the Apple SDKs. Neither absence breaks the build.
+
+## Releases and versioning
+
+Releases are git tags of the form `v1.0.0`; [CHANGELOG.md](CHANGELOG.md)
+records what each one contains. Source is the only distribution — no compiled
+archive is published.
+
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): the
+major component changes when the public API breaks, the minor when it grows
+compatibly, the patch for compatible fixes. TextLib is versioned independently
+of anything that consumes it, so `find_package(TextLib 1.0)` accepting any 1.x
+is a compatibility promise rather than an accident of release timing.
 
 ## License
 
