@@ -49,6 +49,16 @@ a predecessor.
 
 ### Fixed
 
+- `HTML::Document` leaked the entire parsed document on every load. It freed its
+  libxml2 parser context with `htmlFreeParserCtxt`, which releases the context
+  but not the tree hanging off `ctxt->myDoc` — that allocation outlives the
+  context by design, which is what lets `getRootNode()` keep working after
+  parsing, and so belongs to the caller to free. Every `loadFile` and
+  `loadString` call, and every destruction, dropped a whole document. All three
+  sites now go through one `releaseParser()` that detaches `myDoc` and frees it
+  with `xmlFreeDoc`. Found by running the self-tests under LeakSanitizer, which
+  only exists on the Linux legs — macOS AddressSanitizer has no leak detection,
+  so this had never been visible.
 - The generated package version file read `PROJECT_VERSION`, which this library
   leaves unset whenever it is not the top-level project — including when an
   enclosing project builds it as a deliberate package member by setting the

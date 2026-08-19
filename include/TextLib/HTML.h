@@ -121,7 +121,11 @@ static_assert(sizeof(Node) == sizeof(xmlNode));
 
 class Document final {
 	htmlParserCtxtPtr _parser = nullptr;
-	
+
+	/// @brief Frees the parser context and the document it produced, leaving both null.
+	/// @details Freeing the context alone leaks the parsed tree; see the definition for why.
+	void releaseParser();
+
 public:
 	Document() = default;
 	~Document();

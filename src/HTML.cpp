@@ -384,18 +384,38 @@ std::string Node::trimString(std::string_view string) {
 /// MARK: Document
 ///----------------------------------------
 
-Document::~Document() {
-	if (_parser) {
-		htmlFreeParserCtxt(_parser);
+///----------------------------------------
+/// @brief Releases the parser context and the document it produced.
+///
+/// @details htmlFreeParserCtxt frees the context alone. The parsed tree hanging off ctxt->myDoc is
+///          a separate allocation that outlives the context by design — which is exactly what lets
+///          getRootNode() keep returning nodes after parsing finishes — so it belongs to this class
+///          to free, and releasing only the context leaks the whole document. myDoc is detached
+///          before the context is torn down so that teardown cannot reach a tree already freed here.
+///----------------------------------------
+
+void Document::releaseParser() {
+	if (!_parser) {
+		return;
+	}
+	
+	xmlDocPtr document = _parser->myDoc;
+	_parser->myDoc = nullptr;
+	htmlFreeParserCtxt(_parser);
+	_parser = nullptr;
+	
+	if (document) {
+		xmlFreeDoc(document);
 	}
 }
 
+Document::~Document() {
+	releaseParser();
+}
+
 bool Document::loadFile(const std::filesystem::path& path) {
-	// Free previous parser
-	if (_parser) {
-		htmlFreeParserCtxt(_parser);
-		_parser = nullptr;
-	}
+	// Free previous parser and its document
+	releaseParser();
 	
 	// Open the file as a memory map
 	auto file = Core::MemoryMappedFile::open(path);
@@ -412,11 +432,8 @@ bool Document::loadFile(const std::filesystem::path& path) {
 }
 
 bool Document::loadString(std::string_view string) {
-	// Free previous parser
-	if (_parser) {
-		htmlFreeParserCtxt(_parser);
-		_parser = nullptr;
-	}
+	// Free previous parser and its document
+	releaseParser();
 	
 	// Parse
 	_parser = htmlCreatePushParserCtxt(nullptr, nullptr, nullptr, 0, nullptr, XML_CHAR_ENCODING_UTF8);
